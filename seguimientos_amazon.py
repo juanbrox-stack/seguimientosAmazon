@@ -5,12 +5,12 @@ import io
 import re
 
 # Configuración de la página
-st.set_page_config(page_title="Amazon Tracking Generator", layout="wide", page_icon="📦")
+st.set_page_config(page_title="Amazon Tracking Generator", layout="wide", page_icon="Excel")
 
-st.title("📦 Generador de Ficheros de Seguimiento Amazon")
+st.title("📊 Generador de Seguimientos (Formato Excel)")
 st.markdown("""
-Esta aplicación cruza los pedidos pendientes de Amazon con el SGA.
-**Cambios aplicados:** `order-item-id` extraído de Columna B, búsqueda de pedido en Q o S, y limpieza estricta de formatos numéricos.
+Esta aplicación genera un archivo **.xlsx** para que puedas revisarlo sin que se rompan los formatos numéricos.
+**Instrucciones:** Una vez revisado en Excel, recuerda 'Guardar como' archivo de texto delimitado por tabuladores (.txt) para subirlo a Amazon.
 """)
 
 def es_formato_amazon(texto):
@@ -21,7 +21,6 @@ def limpiar_texto_puro(valor):
     """Fuerza el valor a string, elimina decimales .0 y quita espacios"""
     if pd.isna(valor) or valor == "":
         return ""
-    # Convertimos a string y eliminamos el .0 que añade Excel a los números largos
     str_val = str(valor).split('.')[0].strip()
     return str_val
 
@@ -35,12 +34,10 @@ if tienda != "Seleccionar...":
     file_amazon = st.file_uploader("Sube el archivo .txt de Amazon", type=['txt'])
 
     if file_amazon:
-        # Leemos el TXT de Amazon (tabulado) forzando que todo sea texto
         df_pendientes = pd.read_csv(file_amazon, sep='\t', dtype=str, keep_default_na=False)
         df_pendientes.columns = df_pendientes.columns.str.strip()
         
         try:
-            # Columna purchase-date para aviso al usuario 
             fechas = pd.to_datetime(df_pendientes['purchase-date'].str[:10])
             fecha_minima = fechas.min().strftime('%d/%m/%Y')
             st.warning(f"⚠️ El pedido más antiguo es del: {fecha_minima}. Descarga el SGA de {tienda} desde esta fecha.")
@@ -57,12 +54,11 @@ if tienda != "Seleccionar...":
             else:
                 df_sga = pd.read_excel(file_sga, dtype=str, keep_default_na=False)
 
-            if st.button("🚀 Generar Fichero de Subida"):
+            if st.button("🚀 Generar Excel para Revisión"):
                 try:
-                    # --- PASO 3: MAPEO DEL SGA (Lógica de Col Q o S) ---
+                    # --- PASO 3: MAPEO DEL SGA ---
                     sga_dict = {}
                     for _, row in df_sga.iterrows():
-                        # Índices según macro original: Q=16, S=18, F=5, D=3, R=17
                         val_q = limpiar_texto_puro(row.iloc[16])
                         val_s = limpiar_texto_puro(row.iloc[18])
                         
@@ -72,7 +68,6 @@ if tienda != "Seleccionar...":
                         elif es_formato_amazon(val_s):
                             id_final = val_s
                         else:
-                            # Si no hay formato Amazon, aplicar lógica UD o guiones
                             id_final = val_s if ("UD" in val_q.upper() or "-" in val_s) else val_q
                         
                         if "_REGEN_" in id_final.upper():
@@ -80,9 +75,9 @@ if tienda != "Seleccionar...":
                         
                         if "-" in id_final:
                             sga_dict[id_final] = [
-                                str(row.iloc[5]).strip(), # Agencia
-                                str(row.iloc[3]).strip(), # Tracking
-                                str(row.iloc[17]).strip() # Tracking Alt
+                                str(row.iloc[5]).strip(), 
+                                str(row.iloc[3]).strip(), 
+                                str(row.iloc[17]).strip()
                             ]
 
                     # --- PASO 4: PROCESAR CRUCE ---
@@ -91,15 +86,12 @@ if tienda != "Seleccionar...":
 
                     for _, row in df_pendientes.iterrows():
                         id_pedido = limpiar_texto_puro(row['order-id'])
-                        # Filtro Is-Prime (Columna 34 de la macro / Índice 33)
                         is_prime = str(row.iloc[33]).upper() if len(row) > 33 else "FALSE"
                         
                         if "-" not in id_pedido or is_prime == "TRUE":
                             continue
                         
-                        # order-item-id extraído de Columna B (Índice 1) 
                         order_item_id = limpiar_texto_puro(row.iloc[1])
-                        
                         reporting_date = str(row['reporting-date'])
                         promise_date_val = str(row['promise-date']).strip()
                         quantity = str(row['quantity-to-ship'])
@@ -172,30 +164,43 @@ if tienda != "Seleccionar...":
                             "promise-date": promise_date_val
                         })
 
-                    # --- PASO 5: ORDENACIÓN Y EXPORTACIÓN ---
+                    # --- PASO 5: ORDENACIÓN Y EXPORTACIÓN A EXCEL ---
                     df_final = pd.DataFrame(results)
                     
                     if not df_final.empty:
-                        # Ordenar por Tracking (Col G) y luego por Promise Date
                         df_final = df_final.sort_values(by=['tracking-number', 'promise-date'], ascending=[True, True])
                         
-                        st.success(f"✅ ¡Hecho! {len(df_final)} pedidos listos.")
-                        
-                        # Vista previa
-                        st.dataframe(df_final.astype(str))
+                        # Creamos el buffer de Excel
+                        output = io.BytesIO()
+                        # Usamos XlsxWriter como motor para poder definir formatos de columna
+                        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                            df_final.to_excel(writer, index=False, sheet_name='Seguimientos')
+                            
+                            workbook  = writer.book
+                            worksheet = writer.sheets['Seguimientos']
+                            
+                            # Formato de texto para evitar notación científica
+                            format_texto = workbook.add_format({'num_format': '@'})
+                            
+                            # Aplicar formato de texto a columnas críticas:
+                            # A (order-id), B (order-item-id), G (tracking-number)
+                            worksheet.set_column('A:A', 25, format_texto)
+                            worksheet.set_column('B:B', 20, format_texto)
+                            worksheet.set_column('G:G', 25, format_texto)
+                            worksheet.set_column('C:F', 15)
+                            worksheet.set_column('H:I', 20)
 
-                        # Generar archivo TXT tabulado sin comillas (quoting=3)
-                        output = io.StringIO()
-                        df_final.to_csv(output, sep='\t', index=False, quoting=3, escapechar=' ')
+                        st.success(f"✅ ¡Hecho! {len(df_final)} pedidos listos en Excel.")
                         
                         st.download_button(
-                            label="⬇️ Descargar Fichero para Amazon",
+                            label="⬇️ Descargar Fichero Excel (.xlsx)",
                             data=output.getvalue(),
-                            file_name=f"{datetime.now().strftime('%Y%m%d')}_{tienda}.txt",
-                            mime="text/plain"
+                            file_name=f"{datetime.now().strftime('%Y%m%d')}_{tienda}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
+                        st.dataframe(df_final.astype(str))
                     else:
-                        st.warning("No se encontraron registros que procesar.")
+                        st.warning("No se encontraron registros.")
 
                 except Exception as e:
                     st.error(f"Error en el proceso: {str(e)}")
