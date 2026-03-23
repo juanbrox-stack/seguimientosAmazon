@@ -9,13 +9,21 @@ st.set_page_config(page_title="Amazon Tracking Generator", layout="wide", page_i
 
 st.title("📦 Generador de Ficheros de Seguimiento Amazon")
 st.markdown("""
-Esta aplicación procesa los pedidos pendientes de Amazon y genera el fichero de subida.
-**Nota:** Se ha forzado la inclusión de `promise-date` como la última columna del fichero.
+Esta aplicación cruza los pedidos pendientes de Amazon con el SGA.
+**Cambios aplicados:** `order-item-id` extraído de Columna B, búsqueda de pedido en Q o S, y limpieza estricta de formatos numéricos.
 """)
 
 def es_formato_amazon(texto):
-    """Verifica si el texto tiene el patrón de pedido de Amazon (ej. 171-...)"""
+    """Verifica si el texto sigue el patrón XXX-XXXXXXX-XXXXXXX"""
     return bool(re.match(r'^\d{3}-', str(texto)))
+
+def limpiar_texto_puro(valor):
+    """Fuerza el valor a string, elimina decimales .0 y quita espacios"""
+    if pd.isna(valor) or valor == "":
+        return ""
+    # Convertimos a string y eliminamos el .0 que añade Excel a los números largos
+    str_val = str(valor).split('.')[0].strip()
+    return str_val
 
 # --- PASO 0: SELECCIÓN DE TIENDA ---
 tienda = st.selectbox("¿Qué tienda es?", ["Seleccionar...", "Jabiru", "Turaco", "Marabú"])
@@ -27,15 +35,17 @@ if tienda != "Seleccionar...":
     file_amazon = st.file_uploader("Sube el archivo .txt de Amazon", type=['txt'])
 
     if file_amazon:
+        # Leemos el TXT de Amazon (tabulado) forzando que todo sea texto
         df_pendientes = pd.read_csv(file_amazon, sep='\t', dtype=str, keep_default_na=False)
         df_pendientes.columns = df_pendientes.columns.str.strip()
         
         try:
+            # Columna purchase-date para aviso al usuario 
             fechas = pd.to_datetime(df_pendientes['purchase-date'].str[:10])
             fecha_minima = fechas.min().strftime('%d/%m/%Y')
             st.warning(f"⚠️ El pedido más antiguo es del: {fecha_minima}. Descarga el SGA de {tienda} desde esta fecha.")
         except:
-            st.info("No se pudo extraer la fecha mínima de compra.")
+            st.info("No se pudo determinar la fecha del pedido más antiguo.")
 
         # --- PASO 2: CARGAR ARCHIVO SGA ---
         st.subheader("2. Cargar Datos del SGA")
@@ -49,12 +59,12 @@ if tienda != "Seleccionar...":
 
             if st.button("🚀 Generar Fichero de Subida"):
                 try:
-                    # --- PASO 3: MAPEO DEL SGA ---
+                    # --- PASO 3: MAPEO DEL SGA (Lógica de Col Q o S) ---
                     sga_dict = {}
                     for _, row in df_sga.iterrows():
-                        # Índices: Q=16, S=18, F=5, D=3, R=17
-                        val_q = str(row.iloc[16]).strip() if len(row) > 16 else ""
-                        val_s = str(row.iloc[18]).strip() if len(row) > 18 else ""
+                        # Índices según macro original: Q=16, S=18, F=5, D=3, R=17
+                        val_q = limpiar_texto_puro(row.iloc[16])
+                        val_s = limpiar_texto_puro(row.iloc[18])
                         
                         id_final = ""
                         if es_formato_amazon(val_q):
@@ -62,6 +72,7 @@ if tienda != "Seleccionar...":
                         elif es_formato_amazon(val_s):
                             id_final = val_s
                         else:
+                            # Si no hay formato Amazon, aplicar lógica UD o guiones
                             id_final = val_s if ("UD" in val_q.upper() or "-" in val_s) else val_q
                         
                         if "_REGEN_" in id_final.upper():
@@ -69,28 +80,28 @@ if tienda != "Seleccionar...":
                         
                         if "-" in id_final:
                             sga_dict[id_final] = [
-                                str(row.iloc[5]).strip(), 
-                                str(row.iloc[3]).strip(), 
-                                str(row.iloc[17]).strip()
+                                str(row.iloc[5]).strip(), # Agencia
+                                str(row.iloc[3]).strip(), # Tracking
+                                str(row.iloc[17]).strip() # Tracking Alt
                             ]
 
-                    # --- PASO 4: PROCESAR PENDIENTES ---
+                    # --- PASO 4: PROCESAR CRUCE ---
                     results = []
                     fecha_ahora = datetime.now()
 
                     for _, row in df_pendientes.iterrows():
-                        id_pedido = str(row['order-id']).strip()
+                        id_pedido = limpiar_texto_puro(row['order-id'])
+                        # Filtro Is-Prime (Columna 34 de la macro / Índice 33)
                         is_prime = str(row.iloc[33]).upper() if len(row) > 33 else "FALSE"
                         
                         if "-" not in id_pedido or is_prime == "TRUE":
                             continue
                         
-                        order_item_id = str(row['order-item-id']).split('.')[0].strip()
+                        # order-item-id extraído de Columna B (Índice 1) 
+                        order_item_id = limpiar_texto_puro(row.iloc[1])
+                        
                         reporting_date = str(row['reporting-date'])
-                        
-                        # Extraemos la promesa directamente de la columna 'promise-date' del TXT
-                        p_date_val = str(row['promise-date']).strip()
-                        
+                        promise_date_val = str(row['promise-date']).strip()
                         quantity = str(row['quantity-to-ship'])
                         pais = str(row['ship-country']).upper()
                         
@@ -103,20 +114,20 @@ if tienda != "Seleccionar...":
                         carrier_name_final = ""
                         
                         if tracking_raw and tracking_raw != "nan" and tracking_raw != "":
-                            tracking_final = tracking_raw.split('.')[0].strip()
+                            tracking_final = limpiar_texto_puro(tracking_raw)
                         
                         if tracking_final == "":
                             try:
-                                fecha_p_dt = datetime.strptime(p_date_val[:10], '%Y-%m-%d')
+                                fecha_p_dt = datetime.strptime(promise_date_val[:10], '%Y-%m-%d')
                                 if fecha_p_dt > fecha_ahora: continue
                             except: pass
-                            carrier_name_final = p_date_val
                             agencia = "TIPSA" if pais == "ES" else "UPS"
+                            carrier_name_final = promise_date_val
                         else:
                             if "METHOD" in agencia.upper() and tracking_final.upper().startswith("MECE"):
-                                tracking_final = tracking_alt.split('.')[0].strip()
+                                tracking_final = limpiar_texto_puro(tracking_alt)
 
-                        # Normalización
+                        # Normalización de Agencias
                         ag_upper = agencia.upper()
                         era_ontime = False
                         if "ONTIME" in ag_upper or "ON TIME" in ag_upper:
@@ -149,7 +160,6 @@ if tienda != "Seleccionar...":
                             elif agencia == "TIPSA":
                                 if not tracking_final.startswith("046005046005"): tracking_final = "046005046005" + tracking_final
 
-                        # Construcción de la fila en el orden deseado
                         results.append({
                             "order-id": id_pedido,
                             "order-item-id": order_item_id,
@@ -159,25 +169,24 @@ if tienda != "Seleccionar...":
                             "carrier-name": agencia if carrier_code == "OTHER" else carrier_name_final,
                             "tracking-number": tracking_final,
                             "ship-method": ship_method,
-                            "promise-date": p_date_val  # Aseguramos que se guarde aquí
+                            "promise-date": promise_date_val
                         })
 
                     # --- PASO 5: ORDENACIÓN Y EXPORTACIÓN ---
                     df_final = pd.DataFrame(results)
                     
                     if not df_final.empty:
-                        # Ordenamos por Tracking y Promise Date
+                        # Ordenar por Tracking (Col G) y luego por Promise Date
                         df_final = df_final.sort_values(by=['tracking-number', 'promise-date'], ascending=[True, True])
                         
-                        st.success(f"✅ Generados {len(df_final)} registros. Columna 'promise-date' incluida al final.")
+                        st.success(f"✅ ¡Hecho! {len(df_final)} pedidos listos.")
                         
-                        # Mostramos la tabla en Streamlit (aquí verás la columna al final a la derecha)
-                        st.dataframe(df_final)
+                        # Vista previa
+                        st.dataframe(df_final.astype(str))
 
-                        # Generar el archivo de texto
+                        # Generar archivo TXT tabulado sin comillas (quoting=3)
                         output = io.StringIO()
-                        # Forzamos que se escriban todas las columnas presentes en el DataFrame
-                        df_final.to_csv(output, sep='\t', index=False, quoting=0)
+                        df_final.to_csv(output, sep='\t', index=False, quoting=3, escapechar=' ')
                         
                         st.download_button(
                             label="⬇️ Descargar Fichero para Amazon",
@@ -186,7 +195,7 @@ if tienda != "Seleccionar...":
                             mime="text/plain"
                         )
                     else:
-                        st.warning("No se encontraron registros válidos.")
+                        st.warning("No se encontraron registros que procesar.")
 
                 except Exception as e:
-                    st.error(f"Error crítico: {str(e)}")
+                    st.error(f"Error en el proceso: {str(e)}")
